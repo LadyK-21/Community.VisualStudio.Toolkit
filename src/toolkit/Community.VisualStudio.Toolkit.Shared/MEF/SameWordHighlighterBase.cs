@@ -10,6 +10,7 @@ using Microsoft.VisualStudio.Text.Tagging;
 
 namespace Community.VisualStudio.Toolkit
 {
+
     /// <summary>
     /// A base class for providing same-word highlighting.
     /// </summary>
@@ -20,12 +21,17 @@ namespace Community.VisualStudio.Toolkit
         [Import] internal ITextStructureNavigatorSelectorService? _textStructureNavigatorSelector = null;
 
         /// <summary>
-        /// The Options that are used to find the matching words. The default implementation returns 
+        /// Return the tag name for the HighlightWord tags. Defaults to "MarkerFormatDefinition/HighlightWordFormatDefinition".
+        /// Can be overwritten in a subclass to change the format of the tags.
+        /// </summary>
+        public virtual string TextMarkerTagType => "MarkerFormatDefinition/HighlightWordFormatDefinition";
+        /// <summary>
+        /// The Options that are used to find the matching words. The default implementation returns
         /// FindOptions.WholeWord | FindOptions.MatchCase
         /// </summary>
         public virtual FindOptions FindOptions => FindOptions.WholeWord | FindOptions.MatchCase;
         /// <summary>
-        /// Filter the results. 
+        /// Filter the results.
         /// </summary>
         /// <param name="results">Collection of the results</param>
         /// <returns>Filtered list of results. The default implementation returns all the results</returns>
@@ -43,19 +49,22 @@ namespace Community.VisualStudio.Toolkit
         {
             ITextStructureNavigator? navigator = _textStructureNavigatorSelector?.GetTextStructureNavigator(textView.TextBuffer);
 
-            return (ITagger<T>)buffer.Properties.GetOrCreateSingletonProperty(() => 
-                new SameWordHighlighterTagger(textView, buffer, _textSearchService, navigator, this));
+            SameWordHighlighterTagger tagger = buffer.Properties.GetOrCreateSingletonProperty(() =>
+                new SameWordHighlighterTagger(textView, _textSearchService, navigator, this));
+            tagger.RegisterEvents(textView);
+
+            return (ITagger<T>)tagger;
         }
     }
 
     internal class HighlightWordTag : TextMarkerTag
     {
-        public HighlightWordTag() : base("MarkerFormatDefinition/HighlightWordFormatDefinition") { }
+        public HighlightWordTag(string tagName) : base(tagName) { }
     }
 
-    internal class SameWordHighlighterTagger : ITagger<HighlightWordTag>, IDisposable
+    internal class SameWordHighlighterTagger : ITagger<HighlightWordTag>
     {
-        private readonly ITextView _view;
+        internal int Counter;
         private readonly ITextBuffer _buffer;
         private readonly ITextSearchService? _textSearchService;
         private readonly ITextStructureNavigator? _textStructureNavigator;
@@ -63,29 +72,47 @@ namespace Community.VisualStudio.Toolkit
         private NormalizedSnapshotSpanCollection _wordSpans;
         private SnapshotSpan? _currentWord;
         private SnapshotPoint _requestedPoint;
-        private bool _isDisposed;
         private readonly object _syncLock = new();
 
-        public SameWordHighlighterTagger(ITextView view, ITextBuffer sourceBuffer, ITextSearchService? textSearchService, 
+        public SameWordHighlighterTagger(ITextView view, ITextSearchService? textSearchService,
             ITextStructureNavigator? textStructureNavigator, SameWordHighlighterBase tagger)
         {
-            _view = view;
-            _buffer = sourceBuffer;
+            _buffer = view.TextBuffer;
             _textSearchService = textSearchService;
             _textStructureNavigator = textStructureNavigator;
             _tagger = tagger;
             _wordSpans = new NormalizedSnapshotSpanCollection();
             _currentWord = null;
-            _view.Caret.PositionChanged += CaretPositionChanged;
-            _view.LayoutChanged += ViewLayoutChanged;
+            Counter = 0;
         }
 
+        internal void RegisterEvents(ITextView textView)
+        {
+            textView.Caret.PositionChanged += CaretPositionChanged;
+            textView.LayoutChanged += ViewLayoutChanged;
+            textView.Closed += TextView_Closed;
+            Counter += 1;
+            //System.Diagnostics.Debug.WriteLine($"RegisterEvents {_fileName}: #{Counter} ");
+        }
+        internal void UnRegisterEvents(ITextView textView)
+        {
+            textView.Caret.PositionChanged -= CaretPositionChanged;
+            textView.LayoutChanged -= ViewLayoutChanged;
+            textView.Closed -= TextView_Closed;
+            Counter -= 1;
+            //System.Diagnostics.Debug.WriteLine($"UnRegisterEvents {_fileName}: #{Counter} ");
+        }
         private void ViewLayoutChanged(object sender, TextViewLayoutChangedEventArgs e)
         {
             if (e.NewSnapshot != e.OldSnapshot)
             {
-                UpdateAtCaretPosition(_view.Caret.Position);
+                ITextView view = (ITextView)sender;
+                UpdateAtCaretPosition(view.Caret.Position);
             }
+        }
+        private void TextView_Closed(object sender, EventArgs e)
+        {
+            UnRegisterEvents((ITextView)sender);
         }
 
         private void CaretPositionChanged(object sender, CaretPositionChangedEventArgs e)
@@ -93,6 +120,16 @@ namespace Community.VisualStudio.Toolkit
             UpdateAtCaretPosition(e.NewPosition);
         }
 
+        private void ClearSpans()
+        {
+            lock (_syncLock)
+            {
+                _currentWord = null;
+                _wordSpans = new();
+                SnapshotSpan span = new(_buffer.CurrentSnapshot, 0, _buffer.CurrentSnapshot.Length);
+                TagsChanged?.Invoke(this, new SnapshotSpanEventArgs(span));
+            }
+        }
         private void UpdateAtCaretPosition(CaretPosition caretPosition)
         {
             SnapshotPoint? point = caretPosition.Point.GetPoint(_buffer, caretPosition.Affinity);
@@ -105,13 +142,20 @@ namespace Community.VisualStudio.Toolkit
             _requestedPoint = point.Value;
             TextExtent? word = _textStructureNavigator?.GetExtentOfWord(_requestedPoint);
 
-            if (word.HasValue && word.Value.IsSignificant && word.Value.Span.Length > 1)
+            if (word.HasValue && word.Value.IsSignificant && word.Value.Span.Length > 0)
             {
                 ThreadHelper.JoinableTaskFactory.StartOnIdleShim(() =>
                 {
                     UpdateWordAdornments(word.Value);
                 }, VsTaskRunContext.UIThreadIdlePriority).FireAndForget();
             }
+            else
+            {
+                // Clear the spans, to make sure that the highlights are
+                // removed when we move the caret to whitespace
+                ClearSpans();
+            }
+
         }
 
         private void UpdateWordAdornments(TextExtent word)
@@ -190,25 +234,14 @@ namespace Community.VisualStudio.Toolkit
             // the duplication here is expected.
             if (spans.OverlapsWith(new NormalizedSnapshotSpanCollection(currentWord)))
             {
-                yield return new TagSpan<HighlightWordTag>(currentWord, new HighlightWordTag());
+                yield return new TagSpan<HighlightWordTag>(currentWord, new HighlightWordTag(_tagger.TextMarkerTagType));
             }
 
             // Second, yield all the other words in the file
             foreach (SnapshotSpan span in NormalizedSnapshotSpanCollection.Overlap(spans, wordSpans))
             {
-                yield return new TagSpan<HighlightWordTag>(span, new HighlightWordTag());
+                yield return new TagSpan<HighlightWordTag>(span, new HighlightWordTag(_tagger.TextMarkerTagType));
             }
-        }
-
-        public void Dispose()
-        {
-            if (!_isDisposed)
-            {
-                _view.Caret.PositionChanged -= CaretPositionChanged;
-                _view.LayoutChanged -= ViewLayoutChanged;
-            }
-
-            _isDisposed = true;
         }
 
         public event EventHandler<SnapshotSpanEventArgs>? TagsChanged;

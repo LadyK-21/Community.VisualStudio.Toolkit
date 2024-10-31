@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
@@ -21,20 +21,15 @@ namespace Community.VisualStudio.Toolkit
         /// <returns>A collection of the command instances</returns>
         public static async Task<IEnumerable<object>> RegisterCommandsAsync(this AsyncPackage package, params Assembly[] assemblies)
         {
-            List<Assembly> assembliesList = assemblies.ToList();
-            Assembly packageAssembly = package.GetType().Assembly;
-            if (!assembliesList.Contains(packageAssembly))
-                assembliesList.Add(packageAssembly);
-
             Type baseCommandType = typeof(BaseCommand<>);
-            IEnumerable<Type> commandTypes = assembliesList.SelectMany(x => x.GetTypes())
+            IEnumerable<Type> commandTypes = IncludePackageAssembly(assemblies, package).SelectMany(x => x.GetTypes())
                 .Where(x =>
                     !x.IsAbstract
                     && x.IsAssignableToGenericType(baseCommandType)
                     && x.GetCustomAttribute<CommandAttribute>() != null);
 
             List<object> commands = new();
-            foreach (Type? commandType in commandTypes)
+            foreach (Type commandType in commandTypes)
             {
                 MethodInfo initializeAsyncMethod = commandType.GetMethod(
                     nameof(BaseCommand<object>.InitializeAsync),
@@ -49,32 +44,36 @@ namespace Community.VisualStudio.Toolkit
         }
 
         /// <summary>
-        /// Automatically calls the <see cref="BaseCommand{T}.InitializeAsync(AsyncPackage)"/> method for every command that has the <see cref="CommandAttribute"/> applied.
+        /// Finds, creates and registers <see cref="BaseFontAndColorProvider"/> implementations.
         /// </summary>
-        /// <param name="package"></param>
-        /// <param name="assemblies"></param>
-        /// <returns></returns>
-        public static void RegisterToolWindows(this AsyncPackage package, params Assembly[] assemblies)
+        /// <param name="package">The package to register the provider in.</param>
+        /// <param name="assemblies">Additional assemblies to scan. The assembly that <paramref name="package"/> is in will always be scanned.</param>
+        /// <returns>A task.</returns>
+        public static async Task RegisterFontAndColorProvidersAsync(this AsyncPackage package, params Assembly[] assemblies)
         {
-            List<Assembly> assembliesList = assemblies.ToList();
-            Assembly packageAssembly = package.GetType().Assembly;
-            if (!assembliesList.Contains(packageAssembly))
-                assembliesList.Add(packageAssembly);
+            Type baseProviderType = typeof(BaseFontAndColorProvider);
+            IEnumerable<Type> providerTypes = IncludePackageAssembly(assemblies, package)
+                .SelectMany(x => x.GetTypes())
+                .Where(x => !x.IsAbstract && baseProviderType.IsAssignableFrom(x));
 
-            Type baseToolWindowType = typeof(BaseToolWindow<>);
-            IEnumerable<Type> toolWindowTypes = assembliesList.SelectMany(x => x.GetTypes())
-                .Where(x =>
-                    !x.IsAbstract
-                    && x.IsAssignableToGenericType(baseToolWindowType));
-
-            foreach (Type? toolWindowtype in toolWindowTypes)
+            foreach (Type providerType in providerTypes)
             {
-                MethodInfo initializeMethod = toolWindowtype.GetMethod(
-                    "Initialize",
-                    BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy);
-
-                initializeMethod.Invoke(null, new object[] { package });
+                ConstructorInfo? ctor = providerType.GetConstructor(Type.EmptyTypes)
+                    ?? throw new InvalidOperationException($"The type '{providerType.Name}' must have a parameterless constructor.");
+                BaseFontAndColorProvider provider = (BaseFontAndColorProvider)ctor.Invoke(Array.Empty<object>());
+                await provider.InitializeAsync(package);
             }
+        }
+
+        private static IReadOnlyList<Assembly> IncludePackageAssembly(IEnumerable<Assembly> assemblies, AsyncPackage package)
+        {
+            List<Assembly> list = assemblies.ToList();
+            Assembly packageAssembly = package.GetType().Assembly;
+            if (!list.Contains(packageAssembly))
+            {
+                list.Add(packageAssembly);
+            }
+            return list;
         }
     }
 }
