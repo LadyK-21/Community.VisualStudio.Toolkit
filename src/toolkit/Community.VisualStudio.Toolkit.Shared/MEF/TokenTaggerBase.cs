@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -58,7 +58,29 @@ namespace Community.VisualStudio.Toolkit
         /// <inheritdoc/>
         public IEnumerable<ITagSpan<TokenTag>> GetTags(NormalizedSnapshotSpanCollection spans)
         {
-            return TagsCache;
+            if (spans.Count == 0)
+            {
+                yield break;
+            }
+
+            List<ITagSpan<TokenTag>> cache = TagsCache;
+            ITextSnapshot requestedSnapshot = spans[0].Snapshot;
+
+            foreach (ITagSpan<TokenTag> tagSpan in cache)
+            {
+                SnapshotSpan tagSnapshotSpan = tagSpan.Span;
+
+                // Translate the tag span to the requested snapshot if needed
+                if (tagSnapshotSpan.Snapshot != requestedSnapshot)
+                {
+                    tagSnapshotSpan = tagSnapshotSpan.TranslateTo(requestedSnapshot, SpanTrackingMode.EdgeExclusive);
+                }
+
+                if (spans.IntersectsWith(tagSnapshotSpan))
+                {
+                    yield return tagSpan;
+                }
+            }
         }
 
         /// <summary>
@@ -102,9 +124,51 @@ namespace Community.VisualStudio.Toolkit
         /// <param name="tags"></param>
         protected void OnTagsUpdated(List<ITagSpan<TokenTag>> tags)
         {
+            List<ITagSpan<TokenTag>> oldTags = TagsCache;
             TagsCache = tags;
-            SnapshotSpan span = new(Buffer.CurrentSnapshot, 0, Buffer.CurrentSnapshot.Length);
-            TagsChanged?.Invoke(this, new SnapshotSpanEventArgs(span));
+
+            if (TagsChanged == null)
+            {
+                return;
+            }
+
+            ITextSnapshot currentSnapshot = Buffer.CurrentSnapshot;
+
+            // Compute the minimal bounding span covering old and new tags
+            int minStart = int.MaxValue;
+            int maxEnd = int.MinValue;
+
+            ComputeBounds(oldTags, currentSnapshot, ref minStart, ref maxEnd);
+            ComputeBounds(tags, currentSnapshot, ref minStart, ref maxEnd);
+
+            if (minStart <= maxEnd && minStart != int.MaxValue)
+            {
+                SnapshotSpan changedSpan = new(currentSnapshot, minStart, maxEnd - minStart);
+                TagsChanged.Invoke(this, new SnapshotSpanEventArgs(changedSpan));
+            }
+        }
+
+        private static void ComputeBounds(List<ITagSpan<TokenTag>> tags, ITextSnapshot currentSnapshot, ref int minStart, ref int maxEnd)
+        {
+            foreach (ITagSpan<TokenTag> tagSpan in tags)
+            {
+                SnapshotSpan span = tagSpan.Span;
+
+                if (span.Snapshot != currentSnapshot)
+                {
+                    span = span.TranslateTo(currentSnapshot, SpanTrackingMode.EdgeExclusive);
+                }
+
+                if (span.Start.Position < minStart)
+                {
+                    minStart = span.Start.Position;
+                }
+
+                if (span.End.Position > maxEnd)
+                {
+                    maxEnd = span.End.Position;
+                }
+            }
         }
 
         /// <inheritdoc/>

@@ -31,10 +31,15 @@ namespace Community.VisualStudio.Toolkit
 
         private void TokenTagsChanged(object sender, TagsChangedEventArgs e)
         {
-            ITextBuffer buffer = e.Span.BufferGraph.TopBuffer;
-            SnapshotSpan span = new(buffer.CurrentSnapshot, 0, buffer.CurrentSnapshot.Length);
+            IMappingSpan mappingSpan = e.Span;
+            NormalizedSnapshotSpanCollection spans = mappingSpan.GetSpans(mappingSpan.BufferGraph.TopBuffer.CurrentSnapshot);
 
-            TagsChanged?.Invoke(this, new SnapshotSpanEventArgs(span));
+            if (spans.Count > 0)
+            {
+                // Forward the actual changed span instead of manufacturing a full-document span
+                SnapshotSpan changedSpan = new(spans[0].Start, spans[spans.Count - 1].End);
+                TagsChanged?.Invoke(this, new SnapshotSpanEventArgs(changedSpan));
+            }
         }
 
         /// <inheritdoc/>

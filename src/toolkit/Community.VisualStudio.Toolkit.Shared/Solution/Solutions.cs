@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -86,11 +86,15 @@ namespace Community.VisualStudio.Toolkit
             IVsSolution solution = await VS.Services.GetSolutionAsync();
             IEnumerable<IVsHierarchy> hierarchies = solution.GetAllProjectHierarchies(filter);
 
+            // Resolve the hierarchy item manager once instead of per-iteration
+            IVsHierarchyItemManager manager = await VS.GetMefServiceAsync<IVsHierarchyItemManager>();
+
             List<Project> list = new();
 
             foreach (IVsHierarchy hierarchy in hierarchies)
             {
-                Project? proj = await SolutionItem.FromHierarchyAsync(hierarchy, VSConstants.VSITEMID_ROOT) as Project;
+                IVsHierarchyItem hierItem = manager.GetHierarchyItem(hierarchy, VSConstants.VSITEMID_ROOT);
+                Project? proj = SolutionItem.FromHierarchyItem(hierItem) as Project;
 
                 if (proj?.Type == SolutionItemType.Project)
                 {
@@ -112,9 +116,14 @@ namespace Community.VisualStudio.Toolkit
             IVsSolution solution = await VS.Services.GetSolutionAsync();
             IEnumerable<IVsHierarchy> hierarchies = solution.GetAllProjectHierarchies(ProjectStateFilter.All);
 
+            // Resolve the hierarchy item manager once instead of per-iteration
+            IVsHierarchyItemManager manager = await VS.GetMefServiceAsync<IVsHierarchyItemManager>();
+
             foreach (IVsHierarchy hierarchy in hierarchies)
             {
-                Project? proj = await SolutionItem.FromHierarchyAsync(hierarchy, VSConstants.VSITEMID_ROOT) as Project;
+                IVsHierarchyItem hierItem = manager.GetHierarchyItem(hierarchy, VSConstants.VSITEMID_ROOT);
+                Project? proj = SolutionItem.FromHierarchyItem(hierItem) as Project;
+
                 if (proj != null)
                 {
                     if (proj.Type == SolutionItemType.Project && string.Compare(proj.Name, projectName, true) == 0)
